@@ -1,13 +1,23 @@
+use std::sync::{Arc, Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use lazy_static::lazy_static;
 pub use std::any::Any;
 
+
+lazy_static! {
+    pub static ref EMITTERS: Mutex<HashMap<String, EventEmitter>> = Mutex::new(HashMap::new());
+}
+
+thread_local! {
+    pub static CURRENT_EMITTER_ID: std::cell::RefCell<String> = 
+        std::cell::RefCell::new(String::from("default"));
+}
 
 type Handler = Box<dyn Fn(&[&dyn Any]) + Send + Sync + 'static>;
 
 #[derive(Clone, Default)]
 pub struct EventEmitter {
-    pub events: Arc<RwLock<HashMap<String, Vec<Handler>>>>,
+    events: Arc<RwLock<HashMap<String, Vec<Handler>>>>,
 }
 
 impl EventEmitter {
@@ -15,67 +25,118 @@ impl EventEmitter {
         Self::default()
     }
 
-    pub fn on(&self, event: &str, listener: Handler) {
+    pub fn on<S: AsRef<str>>(&self, event: S, listener: Handler) {
         let mut events = self.events
             .write()
             .unwrap();
+        let event = event.as_ref().to_string();
 
-        events.entry(event.to_string())
-            .or_default()
-            .push(listener);
+        if !events.contains_key(&event) {
+            events.entry(event)
+                .or_default()
+                .push(listener);
+        }
     }
 
-    pub fn emit(&self, event: &str, args: Vec<&dyn Any>) {
+    pub fn emit<S: AsRef<str>>(&self, event: S, args: Vec<&dyn Any>) {
         let events = self.events
             .read()
             .unwrap();
 
-        if let Some(handlers) = events.get(event) {
+        if let Some(handlers) = events.get(event.as_ref()) {
             for handler in handlers {
                 handler(&args);
             }
         }
     }
 
-    pub fn off(&self, event: &str) {
+    pub fn off<S: AsRef<str>>(&self, event: S) {
         let mut events = self.events
             .write()
             .unwrap();
         
-        events.remove(event);
+        events.remove(event.as_ref());
     }
 }
 
 #[macro_export]
+macro_rules! use_emitter {
+    ($id:expr) => {
+        $crate::CURRENT_EMITTER_ID.with(|cell| {
+            *cell.borrow_mut() = String::from($id);
+        });
+    };
+}
+
+#[macro_export]
+macro_rules! new_emitter {
+    ($id:expr) => {
+        $crate::EMITTERS.lock().unwrap().insert(
+            String::from($id),
+            $crate::EventEmitter::new()
+        );
+    };
+}
+
+#[macro_export]
 macro_rules! on {
-    ($emitter:expr, $event:expr, $($param:ident : $type:ty),*, $body:expr) => {{
-        $emitter.on($event, Box::new(move |args| {
-            let mut iter = args.iter();
-            $(
-                let $param = iter.next()
-                    .expect(concat!("Not enough arguments for parameter: ", stringify!($param)))
-                    .downcast_ref::<$type>()
-                    .expect(concat!("Invalid type for parameter: ", stringify!($param)));
-            )*
-            if iter.next().is_some() {
-                panic!("Too many arguments provided for event: {}", $event);
+    ($event:expr, || $body:expr) => {
+        {
+            let emitter_id = $crate::CURRENT_EMITTER_ID.with(|cell| cell.borrow().clone());
+            let mut emitters = $crate::EMITTERS.lock().unwrap();
+
+            if let Some(emitter) = emitters.get_mut(&emitter_id) {
+                emitter.on($event, Box::new(move |_args: &[&dyn Any]| {
+                    $body
+                }));
             }
-            $body
-        }));
-    }};
+        }
+    };
+    
+    ($event:expr, |$($arg:ident: $type:ty),*| $body:expr) => {
+        {
+            let emitter_id = $crate::CURRENT_EMITTER_ID.with(|cell| cell.borrow().clone());
+            let mut emitters = $crate::EMITTERS.lock().unwrap();
+            
+            if let Some(emitter) = emitters.get_mut(&emitter_id) {
+                emitter.on($event, Box::new(move |args: &[&dyn Any]| {
+                    let mut iter = args.iter();
+                    $(
+                        let $arg = iter.next().unwrap().downcast_ref::<$type>()
+                            .expect("Invalid argument type");
+                    )*
+                    $body
+                }));
+            }
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! emit {
-    ($emitter:expr, $event:expr, $($arg:expr),*) => {{
-        let args: Vec<&dyn Any> = vec![$(&$arg as &dyn Any),*];
-        $emitter.emit($event, args);
-    }};
+    ($event:expr $(, $arg:expr)*) => {
+        {
+            let emitter_id = $crate::CURRENT_EMITTER_ID.with(|cell| cell.borrow().clone());
+            let emitters = $crate::EMITTERS.lock().unwrap();
+
+            if let Some(emitter) = emitters.get(&emitter_id) {
+                let args = vec![$(&$arg as &dyn Any),*];
+                emitter.emit($event, args);
+            }
+        }
+    };
 }
 
 #[macro_export]
 macro_rules! off {
-    ($emitter:expr, $event:expr) => {{
-        $emitter.off($event);
-    }};
+    ($event:expr) => {
+        {
+            let emitter_id = $crate::CURRENT_EMITTER_ID.with(|cell| cell.borrow().clone());
+            let mut emitters = $crate::EMITTERS.lock().unwrap();
+
+            if let Some(emitter) = emitters.get_mut(&emitter_id) {
+                emitter.off($event);
+            }
+        }
+    };
 }

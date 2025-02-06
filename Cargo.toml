@@ -1,6 +1,7 @@
 [package]
-name = "rs-events"
-version = "0.1.0"
+name = "events"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
+lazy_static = { version = "1.5.0"}
