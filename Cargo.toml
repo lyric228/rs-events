@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 lazy_static = { version = "1.5.0"}
+backtrace = { version = "0.3.74"}
