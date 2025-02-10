@@ -71,7 +71,7 @@ impl EventEmitter {
                 eprintln!(
                     "emitter error 'Handler panicked: {:?}' at {}",
                     e,
-                    location
+                    location,
                 );
             }
         }
